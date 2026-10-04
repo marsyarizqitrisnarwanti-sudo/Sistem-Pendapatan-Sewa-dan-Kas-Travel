@@ -1,134 +1,96 @@
-const http = require('http');
+const SUPABASE_URL = 'https://davbfkylsvirirbewboi.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_Nuq-LraX5BaivEV3NiVAkw_hpBtAvIe';
+const REST_BASE = `${SUPABASE_URL}/rest/v1`;
+let state = { trips: [], cash: [], customers: [] };
+let editingTripId = null;
+let editingCashId = null;
+let searchTerm = '';
+const money = value => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(Number(value || 0));
+const dateText = value => value ? new Intl.DateTimeFormat('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(`${value}T00:00:00`)) : '-';
+const $ = selector => document.querySelector(selector);
 
-const PORT = Number(process.env.PORT || 3000);
-const SUPABASE_URL = ('https://davbfkylsvirirbewboi.supabase.co' || '').replace(/\/$/, '');
-const SUPABASE_KEY = 'sb_publishable_Nuq-LraX5BaivEV3NiVAkw_hpBtAvIe' || '';
+function showToast(message, error = false) { const toast = $('#toast'); toast.textContent = message; toast.style.background = error ? '#a54945' : ''; toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 3200); }
+function setToday() { const now = new Date(); const iso = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10); $('#today-label').textContent = new Intl.DateTimeFormat('id-ID', { dateStyle: 'full' }).format(now); $('#trip-date').value = iso; $('#cash-date').value = iso; }
+function net(trip) { return Number(trip.nilai_sewa || 0) - Number(trip.diskon || 0); }
+function cost(trip) { return Number(trip.bensin_aktual || 0) + Number(trip.tol || 0) + Number(trip.parkir || 0) + Number(trip.komisi_driver || 0); }
+function status(value) { return `<span class="status ${value}">${String(value || '').replace('_', ' ')}</span>`; }
+function emptyRow(columns, message = 'Belum ada data') { return `<tr><td class="empty" colspan="${columns}">${message}</td></tr>`; }
 
-function send(response, status, payload) {
-  response.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-  });
-  response.end(JSON.stringify(payload));
+async function supabaseRequest(path, options = {}) { const response = await fetch(`${REST_BASE}/${path}`, { ...options, headers: { apikey: SUPABASE_KEY, Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) } }); const text = await response.text(); let body = null; try { body = text ? JSON.parse(text) : null; } catch { body = text; } if (!response.ok) throw new Error(body?.message || body?.hint || body?.details || 'Permintaan Supabase gagal.'); return body; }
+async function request(path, options = {}) { const data = options.body ? JSON.parse(options.body) : {}; const method = options.method || 'GET'; if (path === '/dashboard') { const [trips, cash, customers] = await Promise.all([supabaseRequest('perjalanan_sewa?select=*&order=tanggal_perjalanan.desc'), supabaseRequest('kas?select=*&order=tanggal_transaksi.desc'), supabaseRequest('pelanggan?select=*&order=nama.asc')]); return { trips, cash, customers }; } if (path === '/customers') return (await supabaseRequest('pelanggan', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(data) }))[0]; if (path.startsWith('/trips/')) return supabaseRequest(`perjalanan_sewa?id=eq.${encodeURIComponent(path.split('/')[2])}`, { method, headers: { Prefer: method === 'DELETE' ? 'return=minimal' : 'return=representation' }, body: method === 'DELETE' ? undefined : JSON.stringify(data) }); if (path === '/trips') { const created = (await supabaseRequest('perjalanan_sewa', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(data) }))[0]; if (Number(data.dp || 0) > 0) await supabaseRequest('kas', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ perjalanan_id: created.id, tanggal_transaksi: data.tanggal_perjalanan, jenis: 'pemasukan', kategori: 'dp_sewa', keterangan: `DP sewa ${data.rute}`, jumlah: Number(data.dp), metode_pembayaran: data.metode_dp || 'tunai' }) }); return created; } if (path.startsWith('/cash/')) return supabaseRequest(`kas?id=eq.${encodeURIComponent(path.split('/')[2])}`, { method, headers: { Prefer: method === 'DELETE' ? 'return=minimal' : 'return=representation' }, body: method === 'DELETE' ? undefined : JSON.stringify(data) }); if (path === '/cash') return (await supabaseRequest('kas', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(data) }))[0]; throw new Error('Rute aplikasi tidak ditemukan.'); }
+async function loadData() { try { state = await request('/dashboard'); render(); } catch (error) { showToast(error.message, true); } }
+function render() {
+  const income = state.cash.filter(item => item.jenis === 'pemasukan').reduce((sum, item) => sum + Number(item.jumlah), 0);
+  const expense = state.cash.filter(item => item.jenis === 'pengeluaran').reduce((sum, item) => sum + Number(item.jumlah), 0);
+  const profit = state.trips.reduce((sum, trip) => sum + net(trip) - cost(trip), 0);
+  $('#income-total').textContent = money(income); $('#expense-total').textContent = money(expense); $('#profit-total').textContent = money(profit); $('#trip-count').innerHTML = `${state.trips.length}<span> perjalanan</span>`;
+  const customerName = trip => state.customers.find(customer => customer.id === trip.pelanggan_id)?.nama || '-';
+  const routeText = trip => (trip.titik_keberangkatan || trip.rute || '-') + ' → ' + (trip.titik_turun || '') + (trip.jam_keberangkatan ? ' · ' + String(trip.jam_keberangkatan).slice(0, 5) : '');
+  const matchesTrip = trip => !searchTerm || `${customerName(trip)} ${JSON.stringify(trip)}`.toLowerCase().includes(searchTerm.toLowerCase());
+  const matchesCash = item => !searchTerm || JSON.stringify(item).toLowerCase().includes(searchTerm.toLowerCase());
+  const visibleTrips = state.trips.filter(matchesTrip);
+  const visibleCash = state.cash.filter(matchesCash);
+  $('#recent-trips').innerHTML = state.trips.length ? state.trips.slice(0, 5).map(trip => `<tr><td>${dateText(trip.tanggal_perjalanan)}</td><td>${customerName(trip)}</td><td>${routeText(trip)}</td><td class="money">${money(net(trip))}</td><td>${status(trip.status)}</td></tr>`).join('') : emptyRow(5, 'Belum ada perjalanan');
+  $('#all-trips').innerHTML = visibleTrips.length ? visibleTrips.map(trip => `<tr><td>${dateText(trip.tanggal_perjalanan)}</td><td>${customerName(trip)}</td><td>${routeText(trip)}<br><small>${(trip.tempat_duduk || []).join(', ') || 'Kursi belum dipilih'}</small></td><td class="money">${money(net(trip))}</td><td>${money(cost(trip))}</td><td class="money">${money(net(trip) - cost(trip))}</td><td>${status(trip.status)}</td><td class="row-actions"><button class="table-action edit-trip" data-id="${trip.id}" title="Edit">✎</button><button class="table-action delete-trip" data-id="${trip.id}" title="Hapus">⌫</button></td></tr>`).join('') : emptyRow(8, searchTerm ? 'Data tidak ditemukan' : 'Belum ada perjalanan');
+  $('#cash-list').innerHTML = visibleCash.length ? visibleCash.map(item => `<tr><td>${dateText(item.tanggal_transaksi)}</td><td>${item.keterangan}</td><td>${String(item.kategori).replaceAll('_', ' ')}</td><td>${item.metode_pembayaran}</td><td class="money ${item.jenis === 'pengeluaran' ? 'negative' : ''}">${item.jenis === 'pengeluaran' ? '-' : '+'}${money(item.jumlah)}</td><td class="row-actions"><button class="table-action edit-cash" data-id="${item.id}" title="Edit">✎</button><button class="table-action delete-cash" data-id="${item.id}" title="Hapus">⌫</button></td></tr>`).join('') : emptyRow(6, searchTerm ? 'Data tidak ditemukan' : 'Belum ada transaksi');
+  $('#trip-customer').innerHTML = state.customers.length ? state.customers.map(customer => `<option value="${customer.id}">${customer.nama}</option>`).join('') : '<option value="">Tambahkan pelanggan di Supabase</option>';
+  document.querySelectorAll('.edit-trip').forEach(button => button.addEventListener('click', () => openTripEditor(button.dataset.id)));
+  document.querySelectorAll('.delete-trip').forEach(button => button.addEventListener('click', () => deleteTrip(button.dataset.id)));
+  document.querySelectorAll('.edit-cash').forEach(button => button.addEventListener('click', () => openCashEditor(button.dataset.id)));
+  document.querySelectorAll('.delete-cash').forEach(button => button.addEventListener('click', () => deleteCash(button.dataset.id)));
 }
+function switchView(view) { searchTerm = ''; document.querySelectorAll('.data-search').forEach(input => { input.value = ''; }); document.querySelectorAll('.view').forEach(item => item.classList.remove('active-view')); $(`#${view}-view`).classList.add('active-view'); document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view)); document.querySelectorAll('.overview-hero,.booking-card,.feature-row').forEach(item => { item.style.display = view === 'overview' ? '' : 'none'; }); $('#page-title').textContent = view === 'overview' ? 'Ringkasan hari ini' : view === 'trips' ? 'Perjalanan sewa' : 'Buku kas'; if (state.trips.length || state.cash.length) render(); }
+function formValue(id) { return $(`#${id}`).value; }
 
-async function supabaseRequest(path, options = {}) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
-    throw new Error('SUPABASE_URL dan SUPABASE_ANON_KEY belum dikonfigurasi.');
-  }
-  const headers = {
-    apikey: SUPABASE_KEY,
-    'Content-Type': 'application/json',
-    ...(options.headers || {})
+function tripPayload() { const origin = formValue('trip-origin'); const destination = formValue('trip-destination'); return { pelanggan_id: formValue('trip-customer'), tanggal_perjalanan: formValue('trip-date'), titik_keberangkatan: origin, titik_turun: destination, jam_keberangkatan: formValue('trip-time'), tempat_duduk: [...document.querySelectorAll('#seat-picker button.selected')].map(button => button.dataset.seat), rute: `${origin} - ${destination}`, kendaraan: formValue('trip-vehicle'), nama_driver: formValue('trip-driver'), status: formValue('trip-status'), nilai_sewa: formValue('trip-rent'), diskon: formValue('trip-discount'), dp: formValue('trip-dp'), bensin_aktual: formValue('trip-fuel'), tol: formValue('trip-toll'), parkir: formValue('trip-parking'), komisi_driver: formValue('trip-commission'), status_penggantian: formValue('trip-reimbursement'), catatan: formValue('trip-notes') }; }
+function clearTripEditor() { editingTripId = null; $('#trip-form').reset(); document.querySelectorAll('#seat-picker button.selected').forEach(button => { button.classList.remove('selected'); button.style.background = '#fbfcf9'; button.style.color = 'var(--ink)'; }); $('#trip-form-panel').hidden = true; $('#trip-form-panel h3').textContent = 'Catat perjalanan'; }
+function openTripEditor(id) { const trip = state.trips.find(item => item.id === id); if (!trip) return; editingTripId = id; $('#trip-form-panel').hidden = false; $('#trip-form-panel h3').textContent = 'Edit perjalanan'; $('#trip-customer').value = trip.pelanggan_id; $('#trip-date').value = trip.tanggal_perjalanan; $('#trip-origin').value = trip.titik_keberangkatan || ''; $('#trip-destination').value = trip.titik_turun || ''; $('#trip-time').value = String(trip.jam_keberangkatan || '').slice(0, 5); $('#trip-route').value = trip.rute || ''; $('#trip-vehicle').value = trip.kendaraan || ''; $('#trip-driver').value = trip.nama_driver || ''; $('#trip-status').value = trip.status || 'terjadwal'; $('#trip-rent').value = trip.nilai_sewa || 0; $('#trip-discount').value = trip.diskon || 0; $('#trip-dp').value = trip.dp || 0; $('#trip-fuel').value = trip.bensin_aktual || 0; $('#trip-toll').value = trip.tol || 0; $('#trip-parking').value = trip.parkir || 0; $('#trip-commission').value = trip.komisi_driver || 0; $('#trip-reimbursement').value = trip.status_penggantian || 'belum_diganti'; $('#trip-notes').value = trip.catatan || ''; document.querySelectorAll('#seat-picker button').forEach(button => { const selected = (trip.tempat_duduk || []).includes(button.dataset.seat); button.classList.toggle('selected', selected); button.style.background = selected ? 'var(--green)' : '#fbfcf9'; button.style.color = selected ? '#fff' : 'var(--ink)'; }); }
+async function deleteTrip(id) { if (!confirm('Hapus perjalanan ini? Data kas yang sudah tercatat tidak ikut dihapus.')) return; try { await request(`/trips/${id}`, { method: 'DELETE' }); showToast('Perjalanan berhasil dihapus.'); await loadData(); } catch (error) { showToast(error.message, true); } }
+function openCashEditor(id) { const item = state.cash.find(entry => entry.id === id); if (!item) return; editingCashId = id; switchView('cash'); $('#cash-form-panel').hidden = false; $('#cash-form-panel h3').textContent = 'Edit transaksi kas'; $('#cash-date').value = item.tanggal_transaksi; $('#cash-type').value = item.jenis; $('#cash-category').value = item.kategori; $('#cash-amount').value = item.jumlah; $('#cash-payment').value = item.metode_pembayaran; $('#cash-description').value = item.keterangan; }
+async function deleteCash(id) { if (!confirm('Hapus transaksi kas ini?')) return; try { await request(`/cash/${id}`, { method: 'DELETE' }); showToast('Transaksi kas berhasil dihapus.'); await loadData(); } catch (error) { showToast(error.message, true); } }
+
+async function submitTrip(event) { event.preventDefault(); try { const payload = tripPayload(); if (!payload.pelanggan_id) throw new Error('Pelanggan wajib dipilih.'); const wasEditing = Boolean(editingTripId); await request(wasEditing ? `/trips/${editingTripId}` : '/trips', { method: wasEditing ? 'PATCH' : 'POST', body: JSON.stringify(payload) }); clearTripEditor(); setToday(); showToast(wasEditing ? 'Perjalanan berhasil diperbarui.' : 'Perjalanan dan DP berhasil dicatat.'); await loadData(); } catch (error) { showToast(error.message, true); } }
+async function submitCash(event) { event.preventDefault(); try { const payload = { tanggal_transaksi: formValue('cash-date'), jenis: formValue('cash-type'), kategori: formValue('cash-category'), jumlah: formValue('cash-amount'), metode_pembayaran: formValue('cash-payment'), keterangan: formValue('cash-description') }; await request(editingCashId ? `/cash/${editingCashId}` : '/cash', { method: editingCashId ? 'PATCH' : 'POST', body: JSON.stringify(payload) }); editingCashId = null; $('#cash-form').reset(); setToday(); $('#cash-form-panel').hidden = true; $('#cash-form-panel h3').textContent = 'Catat transaksi kas'; showToast('Transaksi kas berhasil disimpan.'); await loadData(); } catch (error) { showToast(error.message, true); } }
+async function submitCustomer(event) { event.preventDefault(); try { const customer = await request('/customers', { method: 'POST', body: JSON.stringify({ nama: formValue('customer-name'), nomor_telepon: formValue('customer-phone'), email: formValue('customer-email'), alamat: formValue('customer-address') }) }); $('#customer-form').reset(); $('#customer-form-panel').hidden = true; showToast('Pelanggan berhasil ditambahkan.'); await loadData(); $('#trip-customer').value = customer.id; } catch (error) { showToast(error.message, true); } }
+
+function addManagementControls() { const addSearch = (viewId, placeholder) => { const view = $(`#${viewId}-view`); const heading = view?.querySelector('.panel-heading'); if (!heading || view.querySelector('.data-search')) return; const input = document.createElement('input'); input.className = 'data-search'; input.placeholder = placeholder; input.addEventListener('input', event => { searchTerm = event.target.value; render(); }); heading.appendChild(input); }; addSearch('trips', 'Cari pelanggan, rute, driver...'); addSearch('cash', 'Cari keterangan atau kategori...'); document.querySelectorAll('#all-trips thead tr, #cash-list').forEach(() => {}); const tripHeader = document.querySelector('#all-trips')?.closest('table')?.querySelector('thead tr'); const cashHeader = document.querySelector('#cash-list')?.closest('table')?.querySelector('thead tr'); if (tripHeader && !tripHeader.querySelector('.action-header')) { tripHeader.insertAdjacentHTML('beforeend', '<th class="action-header">Aksi</th>'); } if (cashHeader && !cashHeader.querySelector('.action-header')) { cashHeader.insertAdjacentHTML('beforeend', '<th class="action-header">Aksi</th>'); } }
+
+function addTripDetailsFields() {
+  const grid = document.querySelector('#trip-form .form-grid');
+  if (!grid || $('#trip-origin')) return;
+
+  const seats = ['1A', '1B', '1C', '1D', '2A', '2B', '2C', '2D', '3A', '3B', '3C', '3D', '4A', '4B', '4C', '4D'];
+  const seatButtons = seats.map(seat => `<button type="button" data-seat="${seat}" style="border:1px solid #dce5dc;border-radius:4px;padding:8px 10px;background:#fbfcf9;color:var(--ink);cursor:pointer">${seat}</button>`).join('');
+  const details = document.createElement('div');
+  details.className = 'form-grid wide';
+  details.style.gridColumn = '1 / -1';
+  details.innerHTML = '<label>Titik keberangkatan<input id="trip-origin" required placeholder="Contoh: Pool Shabila Trans"></label>' +
+    '<label>Titik turun<input id="trip-destination" required placeholder="Contoh: Terminal Bandung"></label>' +
+    '<label>Jam keberangkatan<select id="trip-time" required><option value="">Pilih jam</option><option>06:00</option><option>07:00</option><option>08:00</option><option>09:00</option><option>10:00</option><option>11:00</option><option>12:00</option><option>13:00</option><option>14:00</option><option>15:00</option><option>16:00</option><option>17:00</option><option>18:00</option><option>19:00</option><option>20:00</option><option>21:00</option></select></label>' +
+    `<label style="grid-column:span 2">Tempat duduk <small>Pilih satu atau beberapa kursi</small><span id="seat-picker" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:2px">${seatButtons}</span></label>`;
+  grid.parentElement.insertBefore(details, grid);
+
+  document.querySelector('#trip-date').parentElement.childNodes[0].textContent = 'Tanggal keberangkatan';
+  const routeInput = $('#trip-route');
+  routeInput.required = false;
+  routeInput.readOnly = true;
+  routeInput.placeholder = 'Terbentuk otomatis dari titik keberangkatan dan titik turun';
+  const updateRoute = () => {
+    routeInput.value = `${$('#trip-origin').value} - ${$('#trip-destination').value}`.replace(/^ - | - $/g, '');
   };
-  const result = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...options, headers });
-  const text = await result.text();
-  let body;
-  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-  if (!result.ok) throw new Error(body?.message || body?.hint || 'Permintaan Supabase gagal.');
-  return body;
+  $('#trip-origin').addEventListener('input', updateRoute);
+  $('#trip-destination').addEventListener('input', updateRoute);
+  details.querySelectorAll('#seat-picker button').forEach(button => button.addEventListener('click', () => {
+    const selected = button.classList.toggle('selected');
+    button.style.background = selected ? 'var(--green)' : '#fbfcf9';
+    button.style.color = selected ? '#fff' : 'var(--ink)';
+  }));
 }
+function addCustomerForm() { const tripView = $('#trips-view'); const tripPanel = $('#trip-form-panel'); if (!tripView || !tripPanel) return; const panel = document.createElement('div'); panel.className = 'form-panel'; panel.id = 'customer-form-panel'; panel.hidden = true; panel.innerHTML = '<form id="customer-form"><div class="form-heading"><h3>Tambah pelanggan</h3><button type="button" class="icon-button" id="close-customer-form">×</button></div><div class="form-grid"><label>Nama pelanggan<input id="customer-name" required></label><label>Nomor telepon<input id="customer-phone"></label><label>Email<input id="customer-email" type="email"></label><label class="wide">Alamat<input id="customer-address"></label></div><button class="primary-button" type="submit">Simpan pelanggan</button></form>'; tripView.insertBefore(panel, tripPanel); const heading = tripView.querySelector('.section-heading'); const button = document.createElement('button'); button.className = 'primary-button'; button.type = 'button'; button.textContent = '+ Pelanggan'; button.addEventListener('click', () => { panel.hidden = false; }); heading.appendChild(button); $('#close-customer-form').addEventListener('click', () => { panel.hidden = true; }); $('#customer-form').addEventListener('submit', submitCustomer); }
 
-function readBody(request) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    request.on('data', chunk => { body += chunk; });
-    request.on('end', () => {
-      try { resolve(body ? JSON.parse(body) : {}); } catch { reject(new Error('JSON tidak valid.')); }
-    });
-    request.on('error', reject);
-  });
-}
+document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
+document.querySelectorAll('[data-view-target]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.viewTarget)));
+$('#new-trip-button').addEventListener('click', () => { editingTripId = null; $('#trip-form').reset(); $('#trip-form-panel h3').textContent = 'Catat perjalanan'; setToday(); $('#trip-form-panel').hidden = false; }); $('#close-trip-form').addEventListener('click', clearTripEditor); $('#new-cash-button').addEventListener('click', () => { editingCashId = null; $('#cash-form').reset(); $('#cash-form-panel h3').textContent = 'Catat transaksi kas'; setToday(); $('#cash-form-panel').hidden = false; }); $('#close-cash-form').addEventListener('click', () => { editingCashId = null; $('#cash-form-panel').hidden = true; $('#cash-form-panel h3').textContent = 'Catat transaksi kas'; }); $('#trip-form').addEventListener('submit', submitTrip); $('#cash-form').addEventListener('submit', submitCash);
+addTripDetailsFields(); addCustomerForm(); addManagementControls(); setToday(); loadData();
 
-function amount(value) {
-  const parsed = Number(value || 0);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-}
-
-async function createTrip(data) {
-  if (!data.pelanggan_id || !data.tanggal_perjalanan || !data.rute || !data.kendaraan || !data.nama_driver) {
-    throw new Error('Data pelanggan, tanggal, rute, kendaraan, dan driver wajib diisi.');
-  }
-  const trip = {
-    pelanggan_id: data.pelanggan_id,
-    tanggal_perjalanan: data.tanggal_perjalanan,
-    rute: data.rute,
-    kendaraan: data.kendaraan,
-    nama_driver: data.nama_driver,
-    status: data.status || 'terjadwal',
-    nilai_sewa: amount(data.nilai_sewa),
-    diskon: amount(data.diskon),
-    dp: amount(data.dp),
-    bensin_aktual: amount(data.bensin_aktual),
-    tol: amount(data.tol),
-    parkir: amount(data.parkir),
-    komisi_driver: amount(data.komisi_driver),
-    status_penggantian: data.status_penggantian || 'belum_diganti',
-    catatan: data.catatan || null
-  };
-  const inserted = await supabaseRequest('perjalanan_sewa', {
-    method: 'POST',
-    headers: { Prefer: 'return=representation' },
-    body: JSON.stringify(trip)
-  });
-  const created = inserted[0];
-  if (trip.dp > 0) {
-    await supabaseRequest('kas', {
-      method: 'POST',
-      headers: { Prefer: 'return=minimal' },
-      body: JSON.stringify({
-        perjalanan_id: created.id,
-        tanggal_transaksi: trip.tanggal_perjalanan,
-        jenis: 'pemasukan',
-        kategori: 'dp_sewa',
-        keterangan: `DP sewa ${trip.rute}`,
-        jumlah: trip.dp,
-        metode_pembayaran: data.metode_dp || 'tunai'
-      })
-    });
-  }
-  return created;
-}
-
-async function route(request, response) {
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  if (request.method === 'OPTIONS') return send(response, 204, {});
-  try {
-    if (request.method === 'GET' && url.pathname === '/api/dashboard') {
-      const [trips, cash, customers] = await Promise.all([
-        supabaseRequest('perjalanan_sewa?select=*,pelanggan(nama)&order=tanggal_perjalanan.desc'),
-        supabaseRequest('kas?select=*&order=tanggal_transaksi.desc'),
-        supabaseRequest('pelanggan?select=*&order=nama.asc')
-      ]);
-      return send(response, 200, { trips, cash, customers });
-    }
-    if (request.method === 'POST' && url.pathname === '/api/customers') {
-      const data = await readBody(request);
-      if (!data.nama) throw new Error('Nama pelanggan wajib diisi.');
-      const created = await supabaseRequest('pelanggan', {
-        method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(data)
-      });
-      return send(response, 201, created[0]);
-    }
-    if (request.method === 'POST' && url.pathname === '/api/trips') {
-      return send(response, 201, await createTrip(await readBody(request)));
-    }
-    if (request.method === 'POST' && url.pathname === '/api/cash') {
-      const data = await readBody(request);
-      if (!data.keterangan || !data.kategori || amount(data.jumlah) <= 0) throw new Error('Keterangan, kategori, dan jumlah wajib diisi.');
-      const created = await supabaseRequest('kas', {
-        method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ ...data, jumlah: amount(data.jumlah) })
-      });
-      return send(response, 201, created[0]);
-    }
-    return send(response, 404, { error: 'Rute tidak ditemukan.' });
-  } catch (error) {
-    return send(response, 400, { error: error.message });
-  }
-}
-
-http.createServer(route).listen(PORT, () => {
-  console.log(`Shabila Trans API berjalan di http://localhost:${PORT}`);
-});
+$('#hero-search').addEventListener('click', () => { switchView('trips'); $('#trip-form-panel').hidden = false; const origin = $('#hero-origin').value.trim(); const destination = $('#hero-destination').value.trim(); if (origin) $('#trip-origin').value = origin; if (destination) $('#trip-destination').value = destination; $('#trip-origin').dispatchEvent(new Event('input')); });
